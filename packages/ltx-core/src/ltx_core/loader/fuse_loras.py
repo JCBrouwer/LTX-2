@@ -116,11 +116,26 @@ def _fuse_delta_with_scaled_fp8(
     """Dequantize scaled FP8 weight, add LoRA delta, and re-quantize."""
     weight_scale = model_sd.sd[scale_key]
 
-    original_weight = weight.t().to(torch.float32) * weight_scale
+    # The LoRA delta has shape [out_features, in_features].
+    # Weights in cuBLAS layout (fp8-scaled-mm) are stored as [in_features, out_features]
+    # and must be transposed before adding the delta. Weights in standard layout
+    # (fp8-cast with a native FP8 checkpoint) match the delta shape and need no transpose.
+    weight_is_transposed = weight.shape != deltas.shape
+
+    if weight_is_transposed:
+        original_weight = weight.t().to(torch.float32) * weight_scale
+    else:
+        original_weight = weight.to(torch.float32) * weight_scale
 
     new_weight = original_weight + deltas.to(torch.float32)
 
     new_fp8_weight, new_weight_scale = quantize_weight_to_fp8_per_tensor(new_weight)
+
+    if not weight_is_transposed:
+        # quantize_weight_to_fp8_per_tensor always transposes its output for cuBLAS
+        # layout. Undo that transpose to preserve the standard [out, in] format.
+        new_fp8_weight = new_fp8_weight.t()
+
     return {key: new_fp8_weight, scale_key: new_weight_scale}
 
 
